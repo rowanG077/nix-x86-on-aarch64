@@ -1,0 +1,334 @@
+--- a/crates/muvm/src/tty.rs
++++ b/crates/muvm/src/tty.rs
+@@ -1,8 +1,9 @@
+ use std::fs::File;
+ use std::io::{stdout, Read, Write};
+ use std::mem::ManuallyDrop;
+-use std::os::fd::{AsFd, FromRawFd};
++use std::os::fd::FromRawFd;
+ use std::os::unix::net::{UnixListener, UnixStream};
++use std::sync::{Arc, Mutex};
+ 
+ use crate::utils::tty::*;
+ use anyhow::Result;
+@@ -40,18 +41,18 @@
+     Ok(None)
+ }
+ 
+-fn process_stdin(remote: &mut UnixStream, epoll: &Epoll, stdin: &mut File) -> Result<()> {
+-    let mut data = [0; 4096];
+-    let len = stdin.read(&mut data)?;
+-    let data = &data[..len];
+-    let cmd = CMD_WRITE_STDIN | (len << CMD_SHIFT) as u16;
+-    remote.write_all(&cmd.to_le_bytes())?;
+-    if len == 0 {
+-        epoll.delete(stdin)?;
+-    } else {
+-        remote.write_all(data)?;
++fn forward_stdin(mut stdin: File, remote: Arc<Mutex<UnixStream>>) -> Result<()> {
++    loop {
++        let mut data = [0; 4096];
++        let len = stdin.read(&mut data)?;
++        let cmd = CMD_WRITE_STDIN | (len << CMD_SHIFT) as u16;
++        let mut remote = remote.lock().unwrap();
++        remote.write_all(&cmd.to_le_bytes())?;
++        remote.write_all(&data[..len])?;
++        if len == 0 {
++            return Ok(());
++        }
+     }
+-    Ok(())
+ }
+ 
+ fn update_size(remote: &mut UnixStream) -> Result<()> {
+@@ -106,14 +107,15 @@
+ }
+ 
+ pub fn run_io_host(listener: UnixListener, is_tty: bool) -> Result<u8> {
+-    let mut stdin = unsafe { ManuallyDrop::new(File::from_raw_fd(0)) };
++    let stdin = unsafe { ManuallyDrop::new(File::from_raw_fd(0)) }.try_clone()?;
+     let mut stdout = unsafe { ManuallyDrop::new(File::from_raw_fd(1)) };
+     let mut stderr = unsafe { ManuallyDrop::new(File::from_raw_fd(2)) };
+     let mut remote = listener.accept()?.0;
++    let writer = Arc::new(Mutex::new(remote.try_clone()?));
++    let stdin_writer = writer.clone();
+     let epoll = Epoll::new(EpollCreateFlags::empty())?;
+     let signalfd = SignalFd::new(&SigSet::from(Signal::SIGWINCH))?;
+     epoll.add(&remote, EpollEvent::new(EpollFlags::EPOLLIN, 1))?;
+-    epoll.add(stdin.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))?;
+     if is_tty {
+         epoll.add(&signalfd, EpollEvent::new(EpollFlags::EPOLLIN, 3))?;
+         sigprocmask(
+@@ -121,8 +123,14 @@
+             Some(&SigSet::from(Signal::SIGWINCH)),
+             None,
+         )?;
+-        update_size(&mut remote)?;
++        update_size(&mut writer.lock().unwrap())?;
+     }
++    // Reading stdin and writing its packets may both block. Keep output
++    // draining independently; regular files and /dev/null also work here,
++    // unlike with epoll on stdin. Inherit the SIGWINCH mask set above.
++    std::thread::spawn(move || {
++        let _ = forward_stdin(stdin, stdin_writer);
++    });
+     loop {
+         let mut evts = [EpollEvent::empty()];
+         match epoll.wait(&mut evts, EpollTimeout::NONE) {
+@@ -142,10 +150,9 @@
+                     break Ok(exit);
+                 }
+             },
+-            2 => process_stdin(&mut remote, &epoll, &mut stdin)?,
+             3 => {
+                 if signalfd.read_signal()?.is_some() {
+-                    update_size(&mut remote)?;
++                    update_size(&mut writer.lock().unwrap())?;
+                 }
+             },
+             _ => unreachable!(),
+--- a/crates/muvm/src/launch.rs
++++ b/crates/muvm/src/launch.rs
+@@ -60,25 +60,17 @@
+     let socket_dir = Path::new(&run_path).join("krun/socket");
+     for port in DYNAMIC_PORT_RANGE {
+         let path = socket_dir.join(format!("port-{port}.lock"));
+-        return Ok((
+-            if !path.exists() {
+-                let lock_file = File::create(path).context("Failed to create socket lock")?;
+-                flock(&lock_file, FlockOperation::NonBlockingLockExclusive)
+-                    .context("Failed to acquire socket lock")?;
+-                lock_file
+-            } else {
+-                let lock_file = File::options()
+-                    .write(true)
+-                    .read(true)
+-                    .open(path)
+-                    .context("Failed to open lock file")?;
+-                if flock(&lock_file, FlockOperation::NonBlockingLockExclusive).is_err() {
+-                    continue;
+-                }
+-                lock_file
+-            },
+-            port,
+-        ));
++        let lock_file = File::options()
++            .create(true)
++            .truncate(false)
++            .write(true)
++            .read(true)
++            .open(path)
++            .context("Failed to open socket lock file")?;
++        if flock(&lock_file, FlockOperation::NonBlockingLockExclusive).is_err() {
++            continue;
++        }
++        return Ok((lock_file, port));
+     }
+     Err(anyhow!("Ran out of ports."))
+ }
+--- a/crates/muvm/src/guest/server_worker.rs
++++ b/crates/muvm/src/guest/server_worker.rs
+@@ -106,7 +106,7 @@
+                 Ok(status) => {
+                     debug!(command:?; "child process exited");
+                     if let Some(sp) = stop_pipe {
+-                        let code = status.code().unwrap_or_default() as u8;
++                        let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8;
+                         _ = File::from(sp).write_all(&[code]);
+                     }
+                     if !status.success() {
+@@ -183,7 +183,7 @@
+         if stream.read_line(&mut buf).await? == 0 {
+             return Err(anyhow!("unexpected EOF"));
+         }
+-        if buf.contains("EOM") {
++        if buf.ends_with("\nEOM\n") {
+             let launch: Launch = serde_json::from_str(&buf[..buf.len() - 5])?;
+             return Ok(launch);
+         }
+@@ -349,6 +349,48 @@
+     })
+ }
+ 
++fn forward_input(mut stdin: Option<File>, mut vsock: StdUnixStream) -> Result<()> {
++    loop {
++        let mut cmd = [0; 2];
++        vsock.read_exact(&mut cmd)?;
++        let cmd = u16::from_le_bytes(cmd);
++        let opc = cmd & CMD_MASK;
++        if opc == CMD_WRITE_STDIN {
++            let len = cmd as usize >> CMD_SHIFT;
++            if len == 0 {
++                stdin = None;
++            } else {
++                let mut buf = vec![0; len];
++                vsock.read_exact(&mut buf)?;
++                if let Some(input) = stdin.as_mut() {
++                    if let Err(err) = input.write_all(&buf) {
++                        if err.kind() != io::ErrorKind::BrokenPipe {
++                            return Err(err.into());
++                        }
++                        stdin = None;
++                    }
++                }
++            }
++        } else if opc == CMD_UPDATE_SIZE {
++            let mut data = [0; 4];
++            vsock.read_exact(&mut data)?;
++            if let Some(stdin) = stdin.as_ref() {
++                tcsetwinsize(
++                    stdin,
++                    Winsize {
++                        ws_col: u16::from_le_bytes(data[..2].try_into().unwrap()),
++                        ws_row: u16::from_le_bytes(data[2..].try_into().unwrap()),
++                        ws_xpixel: 0,
++                        ws_ypixel: 0,
++                    },
++                )?;
++            }
++        } else {
++            return Err(anyhow!("unexpected I/O command: {opc}"));
++        }
++    }
++}
++
+ fn run_io_guest(
+     stdin: OwnedFd,
+     stdout: OwnedFd,
+@@ -356,7 +398,7 @@
+     stop_pipe: OwnedFd,
+     vsock_port: u32,
+ ) -> Result<()> {
+-    let mut stdin = Some(File::from(stdin));
++    let stdin = Some(File::from(stdin));
+     let mut stdout = File::from(stdout);
+     let mut stderr = stderr.map(File::from);
+     let mut stop_pipe = File::from(stop_pipe);
+@@ -371,13 +413,21 @@
+         &VsockAddr::new(nix::libc::VMADDR_CID_HOST, vsock_port),
+     )?;
+     let mut vsock = StdUnixStream::from(vsock_fd);
++    // Child stdin may block while the child is producing output. A separate
++    // reader prevents full-duplex pipelines from deadlocking on both ends.
++    let receiver = vsock.try_clone()?;
++    thread::spawn(move || {
++        let _ = forward_input(stdin, receiver);
++    });
+     let epoll = Epoll::new(EpollCreateFlags::empty())?;
+     epoll.add(&stdout, EpollEvent::new(EpollFlags::EPOLLIN, 1))?;
+     if let Some(ref stderr) = stderr {
+         epoll.add(stderr, EpollEvent::new(EpollFlags::EPOLLIN, 2))?;
+     }
+-    epoll.add(&vsock, EpollEvent::new(EpollFlags::EPOLLIN, 3))?;
+     epoll.add(&stop_pipe, EpollEvent::new(EpollFlags::EPOLLIN, 4))?;
++    let mut exit_code = None;
++    let mut stdout_open = true;
++    let mut stderr_open = stderr.is_some();
+     loop {
+         let mut evts = [EpollEvent::empty()];
+         match epoll.wait(&mut evts, EpollTimeout::NONE) {
+@@ -396,54 +446,36 @@
+                     let len;
+                     let opc;
+                     if evts[0].data() == 1 {
+-                        len = stdout.read(&mut buf)?;
++                        len = match stdout.read(&mut buf) {
++                            Ok(len) => len,
++                            // A PTY returns EIO after its slave has closed.
++                            Err(err) if err.raw_os_error() == Some(nix::libc::EIO) => 0,
++                            Err(err) => return Err(err.into()),
++                        };
+                         opc = CMD_WRITE_STDOUT;
+                     } else {
+                         len = stderr.as_mut().unwrap().read(&mut buf)?;
+                         opc = CMD_WRITE_STDERR;
+                     }
+-                    let cmd = ((len << CMD_SHIFT) as u16 | opc).to_le_bytes();
+-                    vsock.write_all(&cmd)?;
+-                    vsock.write_all(&buf[..len])?;
+-                },
+-                3 => {
+-                    let mut cmd = [0; 2];
+-                    vsock.read_exact(&mut cmd)?;
+-                    let cmd = u16::from_le_bytes(cmd);
+-                    let opc = cmd & CMD_MASK;
+-                    if opc == CMD_WRITE_STDIN {
+-                        let len = cmd as usize >> CMD_SHIFT;
+-                        if len == 0 {
+-                            stdin = None;
++                    if len == 0 {
++                        if evts[0].data() == 1 {
++                            epoll.delete(&stdout)?;
++                            stdout_open = false;
+                         } else {
+-                            let mut buf = vec![0; len];
+-                            vsock.read_exact(&mut buf)?;
+-                            stdin.as_mut().unwrap().write_all(&buf)?;
+-                        }
+-                    } else if opc == CMD_UPDATE_SIZE {
+-                        let mut data = [0; 4];
+-                        vsock.read_exact(&mut data)?;
+-                        if let Some(stdin) = stdin.as_ref() {
+-                            tcsetwinsize(
+-                                stdin,
+-                                Winsize {
+-                                    ws_col: u16::from_le_bytes(data[..2].try_into().unwrap()),
+-                                    ws_row: u16::from_le_bytes(data[2..].try_into().unwrap()),
+-                                    ws_xpixel: 0,
+-                                    ws_ypixel: 0,
+-                                },
+-                            )?;
++                            epoll.delete(stderr.as_ref().unwrap())?;
++                            stderr_open = false;
+                         }
+                     } else {
+-                        unreachable!();
++                        let cmd = ((len << CMD_SHIFT) as u16 | opc).to_le_bytes();
++                        vsock.write_all(&cmd)?;
++                        vsock.write_all(&buf[..len])?;
+                     }
+                 },
+                 4 => {
+                     let mut code = [0];
+                     stop_pipe.read_exact(&mut code)?;
+-                    let cmd = ((code[0] as u16) << CMD_SHIFT) | CMD_EXIT;
+-                    vsock.write_all(&cmd.to_le_bytes())?;
+-                    break Ok(());
++                    exit_code = Some(code[0]);
++                    epoll.delete(&stop_pipe)?;
+                 },
+                 _ => unreachable!(),
+             }
+@@ -453,11 +485,27 @@
+             .intersects(EpollFlags::EPOLLERR | EpollFlags::EPOLLHUP)
+         {
+             match evts[0].data() {
+-                1 => epoll.delete(&stdout)?,
+-                2 => epoll.delete(stderr.as_ref().unwrap())?,
+-                3 | 4 => break Ok(()),
++                // EPOLLIN|HUP may still contain more than one buffer of
++                // output. Drain it before reporting the child's exit code.
++                1 if stdout_open && !evts[0].events().contains(EpollFlags::EPOLLIN) => {
++                    epoll.delete(&stdout)?;
++                    stdout_open = false;
++                },
++                2 if stderr_open && !evts[0].events().contains(EpollFlags::EPOLLIN) => {
++                    epoll.delete(stderr.as_ref().unwrap())?;
++                    stderr_open = false;
++                },
++                1 | 2 | 4 => {},
++                3 => break Ok(()),
+                 _ => unreachable!(),
+             }
+         }
+-    }
+-}
++        if let Some(code) = exit_code {
++            if !stdout_open && !stderr_open {
++                let cmd = ((code as u16) << CMD_SHIFT) | CMD_EXIT;
++                vsock.write_all(&cmd.to_le_bytes())?;
++                break Ok(());
++            }
++        }
++    }
++}

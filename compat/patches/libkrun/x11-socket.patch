@@ -1,0 +1,16 @@
+--- a/src/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -242,7 +242,12 @@
+         #[cfg(target_os = "linux")]
+         if let Ok(x_display) = env::var("DISPLAY") {
+             if let Some(x_display) = x_display.strip_prefix(":") {
+-                let x_path = PathBuf::from(format!("/tmp/.X11-unix/X{x_display}"));
++                // A desktop may expose its socket outside the conventional path.
++                // Keep DISPLAY unchanged for the guest's Xauthority translation.
++                let display_number = x_display.split('.').next().unwrap_or(x_display);
++                let x_path = env::var_os("X11_SOCKET").map(PathBuf::from).unwrap_or_else(|| {
++                    PathBuf::from(format!("/tmp/.X11-unix/X{display_number}"))
++                });
+                 rutabaga_channels.push(RutabagaChannel {
+                     base_channel: x_path,
+                     channel_type: RUTABAGA_CHANNEL_TYPE_X11,

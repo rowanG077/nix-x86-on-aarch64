@@ -1,0 +1,54 @@
+diff --git a/ThunkLibs/libasound/libasound_interface.cpp b/ThunkLibs/libasound/libasound_interface.cpp
+--- a/ThunkLibs/libasound/libasound_interface.cpp
++++ b/ThunkLibs/libasound/libasound_interface.cpp
+@@ -1928,15 +1928,20 @@
+ struct fex_gen_config<snd_mixer_elem_next> {};
+ template<>
+ struct fex_gen_config<snd_mixer_elem_prev> {};
+-// template<> struct fex_gen_config<snd_mixer_elem_set_callback> {};
++// Chromium uses mixer element callbacks for audio device monitoring.
++// The generator supplies the native-to-guest callback trampoline.
++template<>
++struct fex_gen_config<snd_mixer_elem_set_callback> {};
+ template<>
+ struct fex_gen_config<snd_mixer_elem_get_callback_private> {};
+-// template<> struct fex_gen_config<snd_mixer_elem_set_callback_private> {};
++template<>
++struct fex_gen_config<snd_mixer_elem_set_callback_private> {};
+ template<>
+ struct fex_gen_config<snd_mixer_elem_get_type> {};
+ template<>
+ struct fex_gen_config<snd_mixer_class_register> {};
+-// template<> struct fex_gen_config<snd_mixer_elem_new> {};
++template<>
++struct fex_gen_config<snd_mixer_elem_new> {};
+ template<>
+ struct fex_gen_config<snd_mixer_elem_add> {};
+ template<>
+@@ -1977,7 +1982,8 @@
+ // template<> struct fex_gen_config<snd_mixer_class_set_event> {};
+ // template<> struct fex_gen_config<snd_mixer_class_set_private> {};
+ // template<> struct fex_gen_config<snd_mixer_class_set_private_free> {};
+-// template<> struct fex_gen_config<snd_mixer_class_set_compare> {};
++template<>
++struct fex_gen_config<snd_mixer_class_set_compare> {};
+ template<>
+ struct fex_gen_config<snd_mixer_selem_channel_name> {};
+ template<>
+diff --git a/ThunkLibs/libasound/libasound_Host.cpp b/ThunkLibs/libasound/libasound_Host.cpp
+--- a/ThunkLibs/libasound/libasound_Host.cpp
++++ b/ThunkLibs/libasound/libasound_Host.cpp
+@@ -11,6 +11,13 @@
+ #include "common/Host.h"
+ #include <dlfcn.h>
+ 
++// Mixer elements are opaque native handles, including in const callbacks.
++// Passing a 64-bit pointer must not try to repack the inaccessible object.
++#ifndef IS_32BIT_THUNK
++template<>
++inline constexpr bool has_compatible_data_layout<const snd_mixer_elem_t*> = true;
++#endif
++
+ #include "thunkgen_host_libasound.inl"
+ 
+ EXPORTS(libasound)

@@ -1,0 +1,185 @@
+--- a/ThunkLibs/libEGL/libEGL_Guest.cpp
++++ b/ThunkLibs/libEGL/libEGL_Guest.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include <stdio.h>
+ #include <cstring>
++#include <dlfcn.h>
+ 
+ #include "common/Guest.h"
+ 
+@@ -20,7 +21,20 @@
+ 
+ extern "C" {
+ voidFunc* eglGetProcAddress(const char* procname) {
+-  // TODO: Fix this HACK
++  if (!procname) {
++    return nullptr;
++  }
++  if (strncmp(procname, "egl", 3) == 0) {
++    // EGL entrypoints must resolve to guest wrappers, not GLX dispatch stubs
++    // or native AArch64 addresses. Unsupported extensions return nullptr.
++    void* self = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_NOLOAD);
++    if (!self) {
++      return nullptr;
++    }
++    auto result = reinterpret_cast<voidFunc*>(dlsym(self, procname));
++    dlclose(self);
++    return result;
++  }
+   return glXGetProcAddress((const GLubyte*)procname);
+ }
+ }
+--- a/ThunkLibs/libEGL/libEGL_Host.cpp
++++ b/ThunkLibs/libEGL/libEGL_Host.cpp
+@@ -5,6 +5,8 @@
+ */
+ 
+ #include <cstdio>
++#include <algorithm>
++#include <vector>
+ #include <dlfcn.h>
+ 
+ #include <EGL/egl.h>
+@@ -14,4 +16,88 @@
+ 
+ #include "thunkgen_host_libEGL.inl"
+ 
++#ifdef IS_32BIT_THUNK
++using GuestEGLAttrib = int32_t;
++#else
++using GuestEGLAttrib = EGLAttrib;
++#endif
++
++// The generator repacks individual pointees, not variable-length arrays.
++// EGLConfig pointers and EGLAttrib values have different sizes on i386.
++static std::vector<EGLAttrib> HostAttributes(guest_layout<const GuestEGLAttrib*> attributes) {
++  std::vector<EGLAttrib> result;
++  if (auto* value = attributes.get_pointer()) {
++    while (value->data != EGL_NONE) {
++      result.push_back(value++->data);
++      result.push_back(value++->data);
++    }
++    result.push_back(EGL_NONE);
++  }
++  return result;
++}
++
++static void CopyConfigs(guest_layout<EGLConfig*> guest, const std::vector<EGLConfig>& host, EGLint count) {
++  for (int i = 0; i < std::min(count, static_cast<EGLint>(host.size())); ++i) {
++    guest.get_pointer()[i] = to_guest(to_host_layout(host[i]));
++  }
++}
++
++EGLBoolean fexfn_impl_libEGL_eglChooseConfig(EGLDisplay display, const EGLint* attributes,
++                                           guest_layout<EGLConfig*> configs, EGLint capacity, EGLint* count) {
++  std::vector<EGLConfig> native(configs.data ? std::max(capacity, 1) : 0);
++  auto result = fexldr_ptr_libEGL_eglChooseConfig(display, attributes, configs.data ? native.data() : nullptr, capacity, count);
++  if (result && configs.data) {
++    CopyConfigs(configs, native, *count);
++  }
++  return result;
++}
++
++EGLBoolean fexfn_impl_libEGL_eglGetConfigs(EGLDisplay display, guest_layout<EGLConfig*> configs,
++                                         EGLint capacity, EGLint* count) {
++  std::vector<EGLConfig> native(configs.data ? std::max(capacity, 1) : 0);
++  auto result = fexldr_ptr_libEGL_eglGetConfigs(display, configs.data ? native.data() : nullptr, capacity, count);
++  if (result && configs.data) {
++    CopyConfigs(configs, native, *count);
++  }
++  return result;
++}
++
++EGLSync fexfn_impl_libEGL_eglCreateSync(EGLDisplay display, EGLenum type, guest_layout<const GuestEGLAttrib*> attributes) {
++  auto native = HostAttributes(attributes);
++  return fexldr_ptr_libEGL_eglCreateSync(display, type, native.empty() ? nullptr : native.data());
++}
++
++EGLImage fexfn_impl_libEGL_eglCreateImage(EGLDisplay display, EGLContext context, EGLenum target,
++                                       EGLClientBuffer buffer, guest_layout<const GuestEGLAttrib*> attributes) {
++  auto native = HostAttributes(attributes);
++  return fexldr_ptr_libEGL_eglCreateImage(display, context, target, buffer, native.empty() ? nullptr : native.data());
++}
++
++EGLDisplay fexfn_impl_libEGL_eglGetPlatformDisplay(EGLenum platform, void* display, guest_layout<const GuestEGLAttrib*> attributes) {
++  auto native = HostAttributes(attributes);
++  return fexldr_ptr_libEGL_eglGetPlatformDisplay(platform, display, native.empty() ? nullptr : native.data());
++}
++
++EGLSurface fexfn_impl_libEGL_eglCreatePlatformWindowSurface(EGLDisplay display, EGLConfig config, void* window,
++                                                         guest_layout<const GuestEGLAttrib*> attributes) {
++  auto native = HostAttributes(attributes);
++  return fexldr_ptr_libEGL_eglCreatePlatformWindowSurface(display, config, window, native.empty() ? nullptr : native.data());
++}
++
++EGLSurface fexfn_impl_libEGL_eglCreatePlatformPixmapSurface(EGLDisplay display, EGLConfig config, void* pixmap,
++                                                         guest_layout<const GuestEGLAttrib*> attributes) {
++  auto native = HostAttributes(attributes);
++  return fexldr_ptr_libEGL_eglCreatePlatformPixmapSurface(display, config, pixmap, native.empty() ? nullptr : native.data());
++}
++
++EGLBoolean fexfn_impl_libEGL_eglGetSyncAttrib(EGLDisplay display, EGLSync sync, EGLint attribute,
++                                            guest_layout<GuestEGLAttrib*> value) {
++  EGLAttrib native;
++  auto result = fexldr_ptr_libEGL_eglGetSyncAttrib(display, sync, attribute, value.data ? &native : nullptr);
++  if (result && value.data) {
++    value.get_pointer()->data = native;
++  }
++  return result;
++}
++
+ EXPORTS(libEGL)
+--- a/ThunkLibs/libEGL/libEGL_interface.cpp
++++ b/ThunkLibs/libEGL/libEGL_interface.cpp
+@@ -14,7 +14,7 @@
+ template<>
+ struct fex_gen_config<eglBindAPI> {};
+ template<>
+-struct fex_gen_config<eglChooseConfig> {};
++struct fex_gen_config<eglChooseConfig> : fexgen::custom_host_impl {};
+ template<>
+ struct fex_gen_config<eglDestroyContext> {};
+ template<>
+@@ -49,3 +49,41 @@
+ struct fex_gen_config<eglGetDisplay> {};
+ template<>
+ struct fex_gen_param<eglGetDisplay, 0, EGLNativeDisplayType> : fexgen::assume_compatible_data_layout {};
++
++// Complete the EGL core API so enabling the overlay preserves the loader ABI.
++template<typename> struct fex_gen_type {};
++template<> struct fex_gen_type<void> : fexgen::opaque_type {};
++template<> struct fex_gen_config<eglCopyBuffers> {};
++template<> struct fex_gen_config<eglCreatePbufferSurface> {};
++template<> struct fex_gen_config<eglCreatePixmapSurface> {};
++template<> struct fex_gen_config<eglGetConfigAttrib> {};
++template<> struct fex_gen_config<eglQueryContext> {};
++template<> struct fex_gen_config<eglQueryString> {};
++template<> struct fex_gen_config<eglWaitGL> {};
++template<> struct fex_gen_config<eglWaitNative> {};
++template<> struct fex_gen_config<eglBindTexImage> {};
++template<> struct fex_gen_config<eglReleaseTexImage> {};
++template<> struct fex_gen_config<eglSwapInterval> {};
++template<> struct fex_gen_config<eglQueryAPI> {};
++template<> struct fex_gen_config<eglCreatePbufferFromClientBuffer> {};
++template<> struct fex_gen_config<eglReleaseThread> {};
++template<> struct fex_gen_config<eglWaitClient> {};
++template<> struct fex_gen_config<eglDestroySync> {};
++template<> struct fex_gen_config<eglClientWaitSync> {};
++template<> struct fex_gen_config<eglGetSyncAttrib> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglGetSyncAttrib, 3> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglDestroyImage> {};
++template<> struct fex_gen_config<eglWaitSync> {};
++template<> struct fex_gen_param<eglChooseConfig, 2> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglGetConfigs> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglGetConfigs, 1> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglCreateSync> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglCreateSync, 2> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglCreateImage> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglCreateImage, 4> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglGetPlatformDisplay> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglGetPlatformDisplay, 2> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglCreatePlatformWindowSurface> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglCreatePlatformWindowSurface, 3> : fexgen::ptr_passthrough {};
++template<> struct fex_gen_config<eglCreatePlatformPixmapSurface> : fexgen::custom_host_impl {};
++template<> struct fex_gen_param<eglCreatePlatformPixmapSurface, 3> : fexgen::ptr_passthrough {};

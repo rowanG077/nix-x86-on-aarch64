@@ -1,0 +1,121 @@
+--- a/ThunkLibs/libGL/libGL_Guest.cpp
++++ b/ThunkLibs/libGL/libGL_Guest.cpp
+@@ -12,6 +12,7 @@
+ #include <GL/glxext.h>
+ #include <GL/gl.h>
+ #include <GL/glext.h>
++#include <GLES3/gl32.h>
+ 
+ #undef GL_ARB_viewport_array
+ #include "glcorearb.h"
+--- a/ThunkLibs/libGL/libGL_Host.cpp
++++ b/ThunkLibs/libGL/libGL_Host.cpp
+@@ -8,6 +8,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <string_view>
++#include <vector>
+ 
+ #define GL_GLEXT_PROTOTYPES 1
+ #define GLX_GLXEXT_PROTOTYPES 1
+@@ -18,6 +19,7 @@
+ #include <GL/glxext.h>
+ #include <GL/gl.h>
+ #include <GL/glext.h>
++#include <GLES3/gl32.h>
+ #include <xcb/xcb.h>
+ 
+ #include "common/Host.h"
+@@ -71,7 +73,11 @@
+ auto fexfn_impl_libGL_glXGetProcAddress(const GLubyte* name) -> void (*)() {
+   using VoidFn = void (*)();
+   std::string_view name_sv {reinterpret_cast<const char*>(name)};
+-  if (name_sv == "glCompileShaderIncludeARB") {
++  if (name_sv == "glTransformFeedbackVaryings") {
++    return (VoidFn)fexfn_impl_libGL_glTransformFeedbackVaryings;
++  } else if (name_sv == "glTransformFeedbackVaryingsEXT") {
++    return (VoidFn)fexfn_impl_libGL_glTransformFeedbackVaryingsEXT;
++  } else if (name_sv == "glCompileShaderIncludeARB") {
+     return (VoidFn)fexfn_impl_libGL_glCompileShaderIncludeARB;
+   } else if (name_sv == "glCreateShaderProgramv") {
+     return (VoidFn)fexfn_impl_libGL_glCreateShaderProgramv;
+@@ -156,6 +162,30 @@
+ // TODO: unsigned int *glXEnumerateVideoDevicesNV (Display *dpy, int screen, int *nelements);
+ 
+ 
++// A guest array of string pointers needs element-wise widening on i386.
++static std::vector<const char*> HostVaryings(GLsizei count, guest_layout<const char* const*> varyings) {
++  std::vector<const char*> result;
++  if (varyings.data && count > 0) {
++    result.reserve(count);
++    for (GLsizei i = 0; i < count; ++i) {
++      result.push_back(host_layout<const char* const> {varyings.get_pointer()[i]}.data);
++    }
++  }
++  return result;
++}
++
++void fexfn_impl_libGL_glTransformFeedbackVaryings(GLuint program, GLsizei count,
++                                                 guest_layout<const char* const*> varyings, GLenum mode) {
++  auto native = HostVaryings(count, varyings);
++  fexldr_ptr_libGL_glTransformFeedbackVaryings(program, count, native.empty() ? nullptr : native.data(), mode);
++}
++
++void fexfn_impl_libGL_glTransformFeedbackVaryingsEXT(GLuint program, GLsizei count,
++                                                    guest_layout<const char* const*> varyings, GLenum mode) {
++  auto native = HostVaryings(count, varyings);
++  fexldr_ptr_libGL_glTransformFeedbackVaryingsEXT(program, count, native.empty() ? nullptr : native.data(), mode);
++}
++
+ void fexfn_impl_libGL_glCompileShaderIncludeARB(GLuint a_0, GLsizei Count, guest_layout<const GLchar* const*> a_2, const GLint* a_3) {
+ #ifndef IS_32BIT_THUNK
+   auto sources = a_2.force_get_host_pointer();
+--- a/ThunkLibs/libGL/libGL_interface.cpp
++++ b/ThunkLibs/libGL/libGL_interface.cpp
+@@ -7,6 +7,7 @@
+ #include <GL/glxext.h>
+ #include <GL/gl.h>
+ #include <GL/glext.h>
++#include <GLES3/gl32.h>
+ 
+ #undef GL_ARB_viewport_array
+ #include "glcorearb.h"
+@@ -78,6 +79,12 @@
+ template<auto, int, typename = void>
+ struct fex_gen_param {};
+ 
++// Core GLES 3.2 names differ from their desktop extension aliases.
++template<>
++struct fex_gen_config<glBlendBarrier> {};
++template<>
++struct fex_gen_config<glPrimitiveBoundingBox> {};
++
+ template<>
+ struct fex_gen_config<glXQueryCurrentRendererStringMESA> {};
+ template<>
+@@ -5206,17 +5213,14 @@
+ struct fex_gen_config<glTransformFeedbackBufferRange> {};
+ template<>
+ struct fex_gen_config<glTransformFeedbackStreamAttribsNV> {};
+-#ifndef IS_32BIT_THUNK
+-// TODO
+-template<>
+-struct fex_gen_config<glTransformFeedbackVaryingsEXT> {};
+-template<>
+-struct fex_gen_param<glTransformFeedbackVaryingsEXT, 2, const char* const*> : fexgen::assume_compatible_data_layout {};
+-template<>
+-struct fex_gen_config<glTransformFeedbackVaryings> {};
+-template<>
+-struct fex_gen_param<glTransformFeedbackVaryings, 2, const char* const*> : fexgen::assume_compatible_data_layout {};
+-#endif
++template<>
++struct fex_gen_config<glTransformFeedbackVaryingsEXT> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<glTransformFeedbackVaryingsEXT, 2, const char* const*> : fexgen::ptr_passthrough {};
++template<>
++struct fex_gen_config<glTransformFeedbackVaryings> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<glTransformFeedbackVaryings, 2, const char* const*> : fexgen::ptr_passthrough {};
+ template<>
+ struct fex_gen_config<glTransformFeedbackVaryingsNV> {};
+ template<>

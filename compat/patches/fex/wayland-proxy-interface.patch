@@ -1,0 +1,43 @@
+--- a/ThunkLibs/libwayland-client/Guest.cpp
++++ b/ThunkLibs/libwayland-client/Guest.cpp
+@@ -355,4 +355,8 @@
+ 
+ 
++extern "C" const wl_interface* wl_proxy_get_interface(wl_proxy* proxy) {
++  return reinterpret_cast<const wl_interface*>(fex_wl_get_guest_interface(proxy));
++}
++
+ void OnInit() {
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_output_interface), "wl_output_interface");
+--- a/ThunkLibs/libwayland-client/Host.cpp
++++ b/ThunkLibs/libwayland-client/Host.cpp
+@@ -519,3 +519,18 @@
+ }
+ 
++uintptr_t fexfn_impl_libwayland_client_fex_wl_get_guest_interface(wl_proxy* proxy) {
++  const auto* native = get_proxy_interface(proxy);
++  for (const auto& [guest, host] : guest_to_host_interface) {
++    if (host == native) return reinterpret_cast<uintptr_t>(guest);
++  }
++#ifndef IS_32BIT_THUNK
++  // Custom 64-bit interfaces are passed through without repacking.
++  return reinterpret_cast<uintptr_t>(native);
++#else
++  // Every i386 interface used to create a proxy passes through the registry.
++  fprintf(stderr, "Wayland proxy has no registered guest interface\n");
++  std::abort();
++#endif
++}
++
+ EXPORTS(libwayland_client)
+--- a/ThunkLibs/libwayland-client/libwayland-client_interface.cpp
++++ b/ThunkLibs/libwayland-client/libwayland-client_interface.cpp
+@@ -165,4 +165,8 @@
+ template<>
+ struct fex_gen_config<fex_wl_get_interface_event_name> : fexgen::custom_host_impl {};
++uintptr_t fex_wl_get_guest_interface(wl_proxy*);
++template<>
++struct fex_gen_config<fex_wl_get_guest_interface> : fexgen::custom_host_impl {};
++
+ void fex_wl_get_interface_event_signature(wl_proxy*, int, char*);
+ template<>

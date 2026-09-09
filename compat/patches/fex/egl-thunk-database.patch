@@ -1,0 +1,41 @@
+--- a/Data/AppConfig/steamwebhelper.json
++++ b/Data/AppConfig/steamwebhelper.json
+@@ -1,6 +1,7 @@
+ {
+   "Comment": "Bypasses libGL's glX and instead sends GLX requests directly via xcb",
+   "ThunksDB": {
+-    "GL": 0
++    "GL": 0,
++    "EGL": 0
+   }
+ }
+--- a/Data/ThunksDB.json
++++ b/Data/ThunksDB.json
+@@ -6,7 +6,26 @@
+         "@PREFIX_LIB@/libGL.so",
+         "@PREFIX_LIB@/libGL.so.1",
+         "@PREFIX_LIB@/libGL.so.1.2.0",
+-        "@PREFIX_LIB@/libGL.so.1.7.0"
++        "@PREFIX_LIB@/libGL.so.1.7.0",
++        "@PREFIX_LIB@/libOpenGL.so",
++        "@PREFIX_LIB@/libOpenGL.so.0",
++        "@PREFIX_LIB@/libOpenGL.so.0.0.0",
++        "@PREFIX_LIB@/libGLX.so",
++        "@PREFIX_LIB@/libGLX.so.0",
++        "@PREFIX_LIB@/libGLX.so.0.0.0",
++        "@PREFIX_LIB@/libGLESv2.so",
++        "@PREFIX_LIB@/libGLESv2.so.2",
++        "@PREFIX_LIB@/libGLESv2.so.2.0.0"
++      ]
++    },
++    "EGL": {
++      "Library": "libEGL-guest.so",
++      "Depends": [ "GL" ],
++      "Overlay": [
++        "@PREFIX_LIB@/libEGL.so",
++        "@PREFIX_LIB@/libEGL.so.1",
++        "@PREFIX_LIB@/libEGL.so.1.0.0",
++        "@PREFIX_LIB@/libEGL.so.1.1.0"
+       ]
+     },
+     "Vulkan": {

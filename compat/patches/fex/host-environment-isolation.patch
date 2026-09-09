@@ -1,0 +1,22 @@
+diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+--- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
++++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+@@ -482,6 +482,10 @@ int main(int argc, char** argv, char** const envp) {
+     LogMan::Msg::EFmt("FEX requires kernel 5.15 minimum. Expect problems.");
+   }
+ 
++  // Copy the guest environment before putenv can replace entries in envp.
++  // HostEnv must not overwrite existing guest values of the same variable.
++  ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
++
+   // Before we go any further, set all of our host environment variables that the config has provided
+   for (auto& HostEnv : HostEnvironment.All()) {
+     // We are going to keep these alive in memory.
+@@ -489,7 +493,6 @@ int main(int argc, char** argv, char** const envp) {
+     putenv(HostEnv.data());
+   }
+ 
+-  ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
+ 
+   if (!Loader.ELFWasLoaded()) {

@@ -1,0 +1,48 @@
+--- a/ThunkLibs/libwayland-client/Host.cpp
++++ b/ThunkLibs/libwayland-client/Host.cpp
+@@ -456,6 +456,29 @@
+   return fexldr_ptr_libwayland_client_wl_proxy_add_listener(proxy, callback_table, data);
+ }
+ 
++#ifdef IS_32BIT_THUNK
++static guest_layout<wl_message>* AllocateGuestMessages(size_t count) {
++  if (count == 0) {
++    return nullptr;
++  }
++
++  // malloc/new may reuse arenas allocated above 4 GiB before FEX enabled its
++  // 32-bit address-space restrictions. These arrays are dereferenced by the
++  // guest, so request a fresh mapping instead of truncating a heap pointer.
++  // Like the interface symbols they accompany, the arrays live until exit.
++  const size_t bytes = count * sizeof(guest_layout<wl_message>);
++  void* allocation = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (allocation == MAP_FAILED || reinterpret_cast<uintptr_t>(allocation) > UINT32_MAX - (bytes - 1)) {
++    if (allocation != MAP_FAILED) {
++      munmap(allocation, bytes);
++    }
++    fprintf(stderr, "Failed to allocate Wayland interface data in the 32-bit guest address space\n");
++    std::abort();
++  }
++  return static_cast<guest_layout<wl_message>*>(allocation);
++}
++#endif
++
+ void fexfn_impl_libwayland_client_fex_wl_exchange_interface_pointer(guest_layout<wl_interface*> guest_interface_raw, const char* name) {
+   auto& guest_interface = *guest_interface_raw.get_pointer();
+   auto& host_interface = guest_to_host_interface[reinterpret_cast<guest_layout<const wl_interface>*>(&guest_interface)];
+@@ -485,13 +508,13 @@
+ 
+   // NOTE: These arrays are complements to global symbols in the guest, so we
+   //       never explicitly free this memory
+-  guest_interface.data.methods.data = (uintptr_t)new guest_layout<wl_message>[host_interface->method_count];
++  guest_interface.data.methods.data = (uintptr_t)AllocateGuestMessages(host_interface->method_count);
+   for (int i = 0; i < host_interface->method_count; ++i) {
+     guest_interface.data.methods.get_pointer()[i] = to_guest(to_host_layout(host_interface->methods[i]));
+     guest_interface.data.methods.get_pointer()[i].data.types = to_guest(to_host_layout(host_interface->methods[i].types));
+   }
+ 
+-  guest_interface.data.events.data = (uintptr_t)new guest_layout<wl_message>[host_interface->event_count];
++  guest_interface.data.events.data = (uintptr_t)AllocateGuestMessages(host_interface->event_count);
+   for (int i = 0; i < host_interface->event_count; ++i) {
+     guest_interface.data.events.get_pointer()[i] = to_guest(to_host_layout(host_interface->events[i]));
+     guest_interface.data.events.get_pointer()[i].data.types = to_guest(to_host_layout(host_interface->events[i].types));

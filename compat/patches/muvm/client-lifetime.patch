@@ -1,0 +1,470 @@
+--- a/crates/muvm/Cargo.toml
++++ b/crates/muvm/Cargo.toml
+@@ -26,7 +26,7 @@
+ serde_json = { version = "1.0.117", default-features = false, features = ["std"] }
+ shell-words = { version = "1.1.1", default-features = false, features = ["std"] }
+ tempfile = { version = "3.10.1", default-features = false, features = [] }
+-tokio = { version = "1.38.0", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync"] }
++tokio = { version = "1.38.0", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+ tokio-stream = { version = "0.1.15", default-features = false, features = ["net", "sync"] }
+ udev = { version = "0.9.0", default-features = false, features = [] }
+ uuid = { version = "1.10.0", default-features = false, features = ["serde", "std", "v7"] }
+--- a/crates/muvm/src/launch.rs
++++ b/crates/muvm/src/launch.rs
+@@ -102,8 +102,13 @@
+     } else {
+         None
+     };
+-    request_launch(command, command_args, env, vsock_port, tty, privileged)?;
++    // Keep the request connection open independently of the bulk I/O stream.
++    // Its EOF cancels the guest even when application stdin is backpressured.
++    let mut lifetime = request_launch(command, command_args, env, vsock_port, tty, privileged)?;
+     let code = run_io_host(listener, tty)?;
++    // Only acknowledge success after CMD_EXIT was actually received. EOF
++    // before this byte always means cancellation, even if output just drained.
++    lifetime.write_all(&[1])?;
+     drop(raw_tty);
+     Ok(ExitCode::from(code))
+ }
+@@ -187,7 +192,7 @@
+     vsock_port: u32,
+     tty: bool,
+     privileged: bool,
+-) -> Result<()> {
++) -> Result<UnixStream> {
+     let run_path = env::var("XDG_RUNTIME_DIR")
+         .map_err(|e| anyhow!("unable to get XDG_RUNTIME_DIR: {:?}", e))?;
+     let socket_path = Path::new(&run_path).join("krun/server");
+@@ -220,8 +225,8 @@
+         .read_line(&mut resp)
+         .map_err(LaunchError::Connection)?;
+ 
+-    if resp == "OK" {
+-        Ok(())
++    if resp.trim_end() == "OK" {
++        Ok(stream)
+     } else {
+         Err(LaunchError::Server(resp).into())
+     }
+--- a/crates/muvm/src/monitor.rs
++++ b/crates/muvm/src/monitor.rs
+@@ -52,7 +52,7 @@
+     let command = PathBuf::from("/muvmwatermarkscalefactor");
+     let command_args = vec![format!("{wsf}")];
+     let env = HashMap::new();
+-    request_launch(command, command_args, env, 0, false, true)
++    request_launch(command, command_args, env, 0, false, true).map(drop)
+ }
+ 
+ fn run() {
+--- a/crates/muvm/src/guest/mod.rs
++++ b/crates/muvm/src/guest/mod.rs
+@@ -4,6 +4,7 @@
+ pub mod hidpipe;
+ pub mod mount;
+ pub mod net;
++pub mod request_cgroup;
+ pub mod server;
+ pub mod server_worker;
+ pub mod socket;
+--- /dev/null
++++ b/crates/muvm/src/guest/request_cgroup.rs
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: MIT
++use std::ffi::{CStr, CString};
++use std::fs;
++use std::io;
++use std::path::PathBuf;
++use std::time::Duration;
++
++use nix::libc;
++use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
++use uuid::Uuid;
++
++use super::user;
++
++const ROOT: &CStr = c"/sys/fs/cgroup/muvm-requests";
++
++/// Kernel-owned membership for one interactive request, independent of its PGID.
++pub struct RequestCgroup {
++    path: PathBuf,
++    name: CString,
++    procs: CString,
++    kill: CString,
++}
++
++// Only async-signal-safe syscalls may run in these post-fork root helpers.
++// Construct paths and buffers in the parent; never allocate or log in the child.
++fn as_root(action: impl FnOnce() -> i32) -> io::Result<()> {
++    let errno = unsafe { user::run_as_root(action) }.map_err(io::Error::other)?;
++    if errno == 0 {
++        Ok(())
++    } else {
++        Err(io::Error::from_raw_os_error(errno))
++    }
++}
++
++unsafe fn write_control(path: &CStr, value: &[u8]) -> i32 {
++    let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
++    if fd < 0 {
++        return *libc::__errno_location();
++    }
++    let errno = loop {
++        let count = libc::write(fd, value.as_ptr().cast(), value.len());
++        if count == value.len() as isize {
++            break 0;
++        }
++        let errno = if count < 0 {
++            *libc::__errno_location()
++        } else {
++            libc::EIO
++        };
++        if errno != libc::EINTR {
++            break errno;
++        }
++    };
++    libc::close(fd);
++    errno
++}
++
++impl RequestCgroup {
++    pub fn create() -> io::Result<Self> {
++        let path = PathBuf::from(ROOT.to_str().unwrap()).join(Uuid::now_v7().to_string());
++        let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
++        let procs = CString::new(path.join("cgroup.procs").as_os_str().as_encoded_bytes()).unwrap();
++        let kill = CString::new(path.join("cgroup.kill").as_os_str().as_encoded_bytes()).unwrap();
++        as_root(|| unsafe {
++            // This helper exits immediately; the worker's umask is unchanged.
++            // Its unprivileged watcher must be able to read cgroup.events/procs.
++            libc::umask(0o022);
++            if libc::mkdir(ROOT.as_ptr(), 0o755) != 0 && *libc::__errno_location() != libc::EEXIST {
++                return *libc::__errno_location();
++            }
++            if libc::mkdir(name.as_ptr(), 0o755) != 0 {
++                return *libc::__errno_location();
++            }
++            // Fail the launch before exec if this kernel cannot kill cgroups.
++            let fd = libc::open(kill.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
++            if fd < 0 {
++                let errno = *libc::__errno_location();
++                libc::rmdir(name.as_ptr());
++                return errno;
++            }
++            libc::close(fd);
++            0
++        })?;
++        Ok(Self {
++            path,
++            name,
++            procs,
++            kill,
++        })
++    }
++
++    pub fn procs_path(&self) -> CString {
++        self.procs.clone()
++    }
++
++    /// Called only in Command::pre_exec, while the worker's saved root UID exists.
++    pub unsafe fn enter(procs: &CStr) -> io::Result<()> {
++        let uid = libc::geteuid();
++        if libc::seteuid(0) != 0 {
++            return Err(io::Error::last_os_error());
++        }
++        let errno = write_control(procs, b"0");
++        if libc::seteuid(uid) != 0 {
++            return Err(io::Error::last_os_error());
++        }
++        if errno == 0 {
++            Ok(())
++        } else {
++            Err(io::Error::from_raw_os_error(errno))
++        }
++    }
++
++    fn signal_members(&self) -> io::Result<()> {
++        let membership = format!(
++            "0::/{}",
++            self.path.strip_prefix("/sys/fs/cgroup").unwrap().display()
++        );
++        for line in fs::read_to_string(self.path.join("cgroup.procs"))?.lines() {
++            let Some(pid) = line.parse::<i32>().ok().and_then(Pid::from_raw) else {
++                continue;
++            };
++            let Ok(fd) = pidfd_open(pid, PidfdFlags::empty()) else {
++                continue;
++            };
++            // Pin the process BEFORE checking membership. A recycled PID must
++            // never turn a graceful signal into a signal to another request.
++            let current = fs::read_to_string(format!("/proc/{line}/cgroup"));
++            if current.is_ok_and(|value| value.lines().any(|line| line == membership)) {
++                let _ = pidfd_send_signal(fd, Signal::Term);
++            }
++        }
++        Ok(())
++    }
++
++    pub async fn terminate(&self) -> io::Result<()> {
++        // The application enters this root-owned cgroup in pre_exec, BEFORE
++        // it can fork. Every descendant inherits membership, including double
++        // forks, setsid(), job-control groups, and orphans whose parent exited.
++        // Apps cannot write the migration files. The cgroup, not a PID/PGID or
++        // a /proc ancestry snapshot, is therefore the lifetime boundary.
++        //
++        // SIGTERM is only a best-effort grace pass over pidfds. Correctness
++        // comes from cgroup.kill: the kernel kills the entire subtree and
++        // serializes against concurrent forks/migrations. Thus children born
++        // during the grace period cannot escape the final SIGKILL, and other
++        // requests are never included, even if the original PID was recycled.
++        // See https://docs.kernel.org/admin-guide/cgroup-v2.html (cgroup.kill).
++        if let Err(err) = self.signal_members() {
++            log::warn!("Could not send graceful request termination: {err}");
++        }
++        tokio::time::sleep(Duration::from_millis(500)).await;
++        as_root(|| unsafe { write_control(&self.kill, b"1") })
++    }
++
++    pub async fn remove_when_empty(self) -> io::Result<()> {
++        // A successful command may deliberately leave a daemon with closed
++        // stdio. Keep its cgroup until it exits, without delaying CMD_EXIT or
++        // cancelling it after the client acknowledged normal completion.
++        while fs::read_to_string(self.path.join("cgroup.events"))?
++            .lines()
++            .any(|line| line == "populated 1")
++        {
++            tokio::time::sleep(Duration::from_millis(50)).await;
++        }
++        self.remove()
++    }
++
++    pub fn remove(self) -> io::Result<()> {
++        as_root(|| unsafe {
++            if libc::rmdir(self.name.as_ptr()) == 0 {
++                0
++            } else {
++                *libc::__errno_location()
++            }
++        })
++    }
++}
+--- a/crates/muvm/src/guest/server_worker.rs
++++ b/crates/muvm/src/guest/server_worker.rs
+@@ -20,14 +20,15 @@
+ use rustix::process::ioctl_tiocsctty;
+ use rustix::pty::{ptsname, unlockpt};
+ use rustix::termios::{tcsetwinsize, Winsize};
+-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufStream};
++use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufStream};
+ use tokio::net::{UnixListener, UnixStream};
+ use tokio::process::{Child, Command};
+-use tokio::sync::watch;
++use tokio::sync::{oneshot, watch};
+ use tokio::task::{JoinError, JoinSet};
+ use tokio_stream::wrappers::UnixListenerStream;
+ use tokio_stream::StreamExt as _;
+ 
++use crate::guest::request_cgroup::RequestCgroup;
+ use crate::guest::user;
+ use crate::utils::launch::Launch;
+ use crate::utils::stdio::make_stdout_stderr;
+@@ -39,6 +40,7 @@
+         command: PathBuf,
+         child: Child,
+         stop_pipe: Option<OwnedFd>,
++        lifetime: Option<(RequestCgroup, BufStream<UnixStream>, oneshot::Receiver<()>)>,
+     },
+ }
+ 
+@@ -46,7 +48,7 @@
+ pub struct Worker {
+     listener_stream: UnixListenerStream,
+     state_tx: watch::Sender<State>,
+-    child_set: JoinSet<(PathBuf, ChildResult, Option<OwnedFd>)>,
++    child_set: JoinSet<(PathBuf, ChildResult)>,
+ }
+ 
+ #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+@@ -84,8 +86,8 @@
+                     match handle_connection(stream).await {
+                         Ok(request) => match request {
+                             ConnRequest::HandledByBuiltin => {},
+-                            ConnRequest::ExecuteCommand {command, mut child, stop_pipe } => {
+-                                self.child_set.spawn(async move { (command, child.wait().await, stop_pipe) });
++                            ConnRequest::ExecuteCommand {command, child, stop_pipe, lifetime } => {
++                                self.child_set.spawn(async move { (command, wait_for_child(child, stop_pipe, lifetime).await) });
+                                 self.set_child_processes(self.child_set.len());
+                             }
+                         },
+@@ -100,15 +102,11 @@
+         }
+     }
+ 
+-    fn handle_child_join(&self, res: Result<(PathBuf, ChildResult, Option<OwnedFd>), JoinError>) {
++    fn handle_child_join(&self, res: Result<(PathBuf, ChildResult), JoinError>) {
+         match res {
+-            Ok((command, res, stop_pipe)) => match res {
++            Ok((command, res)) => match res {
+                 Ok(status) => {
+                     debug!(command:?; "child process exited");
+-                    if let Some(sp) = stop_pipe {
+-                        let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8;
+-                        _ = File::from(sp).write_all(&[code]);
+-                    }
+                     if !status.success() {
+                         if let Some(code) = status.code() {
+                             eprintln!("{command:?} process exited with status code: {code}");
+@@ -152,6 +150,51 @@
+             true
+         });
+     }
++}
++
++async fn wait_for_child(
++    mut child: Child,
++    stop_pipe: Option<OwnedFd>,
++    lifetime: Option<(RequestCgroup, BufStream<UnixStream>, oneshot::Receiver<()>)>,
++) -> ChildResult {
++    let Some((cgroup, mut lifetime, io_done)) = lifetime else {
++        return child.wait().await;
++    };
++    let result = {
++        let complete = async {
++            // Reaping the leader is safe: descendants stay in the request's
++            // cgroup, so cleanup never depends on retaining or reusing its PID.
++            let status = child.wait().await?;
++            let code = status
++                .code()
++                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8;
++            File::from(stop_pipe.unwrap()).write_all(&[code])?;
++            io_done.await.map_err(io::Error::other)?;
++            Ok::<_, io::Error>(status)
++        };
++        let acknowledged = async {
++            let mut byte = [0];
++            lifetime.read_exact(&mut byte).await?;
++            if byte != [1] {
++                return Err(io::Error::other("invalid completion acknowledgement"));
++            }
++            Ok::<_, io::Error>(())
++        };
++        // Drain output AND receive the client's CMD_EXIT acknowledgement.
++        // Merely finishing I/O is not proof of a normal client exit: it can
++        // race with disconnect. try_join cancels this wait immediately on EOF,
++        // independently of blocked stdin/stdout and of the leader's status.
++        tokio::try_join!(complete, acknowledged).map(|(status, ())| status)
++    };
++    let status = match result {
++        Ok(status) => Ok(status),
++        Err(_) => {
++            cgroup.terminate().await?;
++            child.wait().await
++        },
++    };
++    cgroup.remove_when_empty().await?;
++    status
+ }
+ 
+ impl State {
+@@ -283,17 +326,29 @@
+         tty_fd = Some(tty_m);
+     }
+ 
++    let mut cgroup = if vsock_port != 0 {
++        Some(
++            RequestCgroup::create()
++                .context("Cannot establish request cgroup; refusing untracked launch")?,
++        )
++    } else {
++        None
++    };
+     let mut cmd = Command::new(&command);
+     cmd.args(command_args)
+         .envs(envs)
+         .stdin(stdin)
+         .stdout(stdout)
+         .stderr(stderr);
+-    if tty {
++    if let Some(cgroup) = &cgroup {
++        let procs = cgroup.procs_path();
+         unsafe {
+-            cmd.pre_exec(|| {
++            cmd.pre_exec(move || {
++                RequestCgroup::enter(&procs)?;
+                 setsid()?;
+-                ioctl_tiocsctty(io::stdin())?;
++                if tty {
++                    ioctl_tiocsctty(io::stdin())?;
++                }
+                 Ok(())
+             });
+         }
+@@ -311,16 +366,25 @@
+         .spawn()
+         .with_context(|| format!("Failed to execute {command:?} as child process"));
+     if let Err(err) = &res {
++        if let Some(cgroup) = cgroup.take() {
++            cgroup.remove()?;
++        }
+         let msg = format!("{err:?}");
+         stream.write_all(msg.as_bytes()).await.ok();
+     } else {
+-        stream.write_all(b"OK").await.ok();
++        stream
++            .write_all(if vsock_port != 0 { b"OK\n" } else { b"OK" })
++            .await
++            .ok();
+     }
+     stream.flush().await.ok();
+ 
+     res.map(|mut child| {
+         let stop_pipe;
++        let mut lifetime = None;
+         if vsock_port != 0 {
++            let (io_finished, io_done) = oneshot::channel();
++            lifetime = Some((cgroup.take().unwrap(), stream, io_done));
+             let (stop_r, stop_w) = pipe().unwrap();
+             stop_pipe = Some(stop_w);
+             let stdin: OwnedFd;
+@@ -336,7 +400,7 @@
+                 stderr = Some(child.stderr.take().unwrap().into_owned_fd().unwrap());
+             }
+             thread::spawn(move || {
+-                _ = run_io_guest(stdin, stdout, stderr, stop_r, vsock_port);
++                _ = run_io_guest(stdin, stdout, stderr, stop_r, vsock_port, io_finished);
+             });
+         } else {
+             stop_pipe = None;
+@@ -345,6 +409,7 @@
+             command,
+             child,
+             stop_pipe,
++            lifetime,
+         }
+     })
+ }
+@@ -397,6 +462,7 @@
+     stderr: Option<OwnedFd>,
+     stop_pipe: OwnedFd,
+     vsock_port: u32,
++    io_finished: oneshot::Sender<()>,
+ ) -> Result<()> {
+     let stdin = Some(File::from(stdin));
+     let mut stdout = File::from(stdout);
+@@ -495,6 +561,7 @@
+                     epoll.delete(stderr.as_ref().unwrap())?;
+                     stderr_open = false;
+                 },
++                4 if exit_code.is_none() => return Err(anyhow!("child status channel closed")),
+                 1 | 2 | 4 => {},
+                 3 => break Ok(()),
+                 _ => unreachable!(),
+@@ -502,6 +569,9 @@
+         }
+         if let Some(code) = exit_code {
+             if !stdout_open && !stderr_open {
++                // Report drained output; the lifetime watcher still requires
++                // the host's acknowledgement after it actually reads CMD_EXIT.
++                let _ = io_finished.send(());
+                 let cmd = ((code as u16) << CMD_SHIFT) | CMD_EXIT;
+                 vsock.write_all(&cmd.to_le_bytes())?;
+                 break Ok(());

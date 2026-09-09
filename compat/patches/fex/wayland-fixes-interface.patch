@@ -1,0 +1,150 @@
+diff --git a/ThunkLibs/libwayland-client/Guest.cpp b/ThunkLibs/libwayland-client/Guest.cpp
+--- a/ThunkLibs/libwayland-client/Guest.cpp
++++ b/ThunkLibs/libwayland-client/Guest.cpp
+@@ -4,6 +4,7 @@
+ $end_info$
+ */
+ 
++#include <time.h>
+ #include <wayland-util.h>
+ #include <wayland-client.h>
+ 
+@@ -36,6 +37,7 @@
+ extern "C" const wl_interface wl_region_interface {};
+ extern "C" const wl_interface wl_subcompositor_interface {};
+ extern "C" const wl_interface wl_subsurface_interface {};
++extern "C" const wl_interface wl_fixes_interface {};
+ 
+ #include <algorithm>
+ #include <array>
+@@ -43,6 +45,7 @@
+ #include <cstdio>
+ #include <cstdarg>
+ #include <cstring>
++#include <cstdlib>
+ #include <string>
+ 
+ #include "common/Guest.h"
+@@ -354,6 +357,69 @@
+ }
+ 
+ 
++// Intrusive lists and arrays belong to guest memory. Implement the utility
++// functions here so pointer fields and size_t retain the guest ABI.
++extern "C" void wl_list_init(wl_list* list) {
++  list->prev = list->next = list;
++}
++extern "C" void wl_list_insert(wl_list* list, wl_list* elm) {
++  elm->prev = list;
++  elm->next = list->next;
++  list->next->prev = elm;
++  list->next = elm;
++}
++extern "C" void wl_list_remove(wl_list* elm) {
++  elm->prev->next = elm->next;
++  elm->next->prev = elm->prev;
++  elm->prev = elm->next = nullptr;
++}
++extern "C" int wl_list_empty(const wl_list* list) {
++  return list->next == list;
++}
++extern "C" int wl_list_length(const wl_list* list) {
++  int count = 0;
++  for (auto* elm = list->next; elm != list; elm = elm->next) ++count;
++  return count;
++}
++extern "C" void wl_list_insert_list(wl_list* list, wl_list* other) {
++  if (wl_list_empty(other)) return;
++  other->next->prev = list;
++  other->prev->next = list->next;
++  list->next->prev = other->prev;
++  list->next = other->next;
++}
++extern "C" void wl_array_init(wl_array* array) {
++  *array = {};
++}
++extern "C" void wl_array_release(wl_array* array) {
++  free(array->data);
++}
++extern "C" void* wl_array_add(wl_array* array, size_t size) {
++  if (size > SIZE_MAX - array->size) return nullptr;
++  const size_t required = array->size + size;
++  if (required > array->alloc) {
++    size_t capacity = std::max(array->alloc, size_t{16});
++    while (capacity < required) {
++      if (capacity > SIZE_MAX / 2) { capacity = required; break; }
++      capacity *= 2;
++    }
++    auto* data = realloc(array->data, capacity);
++    if (!data) return nullptr;
++    array->data = data;
++    array->alloc = capacity;
++  }
++  auto* result = static_cast<char*>(array->data) + array->size;
++  array->size = required;
++  return result;
++}
++extern "C" int wl_array_copy(wl_array* array, wl_array* source) {
++  if (array == source) return 0;
++  if (source->size > array->size && !wl_array_add(array, source->size - array->size)) return -1;
++  if (source->size) memcpy(array->data, source->data, source->size);
++  array->size = source->size;
++  return 0;
++}
++
+ void OnInit() {
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_output_interface), "wl_output_interface");
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_shm_pool_interface), "wl_shm_pool_interface");
+@@ -377,6 +443,7 @@
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_region_interface), "wl_region_interface");
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_subcompositor_interface), "wl_subcompositor_interface");
+   fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_subsurface_interface), "wl_subsurface_interface");
++  fex_wl_exchange_interface_pointer(const_cast<wl_interface*>(&wl_fixes_interface), "wl_fixes_interface");
+ }
+ 
+ // Would insert spaces around -
+diff --git a/ThunkLibs/libwayland-client/Host.cpp b/ThunkLibs/libwayland-client/Host.cpp
+--- a/ThunkLibs/libwayland-client/Host.cpp
++++ b/ThunkLibs/libwayland-client/Host.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <string_view>
+ #include <unordered_map>
++#include <time.h>
+ #include <wayland-client.h>
+ 
+ #include <stdio.h>
+diff --git a/ThunkLibs/libwayland-client/libwayland-client_interface.cpp b/ThunkLibs/libwayland-client/libwayland-client_interface.cpp
+--- a/ThunkLibs/libwayland-client/libwayland-client_interface.cpp
++++ b/ThunkLibs/libwayland-client/libwayland-client_interface.cpp
+@@ -1,5 +1,6 @@
+ #include <common/GeneratorInterface.h>
+ 
++#include <time.h>
+ #include <wayland-client.h>
+ 
+ template<auto>
+@@ -167,3 +168,23 @@
+ void fex_wl_get_interface_event_signature(wl_proxy*, int, char*);
+ template<>
+ struct fex_gen_config<fex_wl_get_interface_event_signature> : fexgen::custom_host_impl {};
++
++// Current Wayland queue APIs, including ABI conversion for timespec.
++template<>
++struct fex_gen_config<wl_display_create_queue_with_name> {};
++template<>
++struct fex_gen_config<wl_display_dispatch_timeout> {};
++template<>
++struct fex_gen_config<wl_display_dispatch_queue_timeout> {};
++template<>
++struct fex_gen_config<wl_display_dispatch_pending_single> {};
++template<>
++struct fex_gen_config<wl_display_dispatch_queue_pending_single> {};
++template<>
++struct fex_gen_config<wl_display_set_max_buffer_size> {};
++template<>
++struct fex_gen_config<wl_proxy_get_display> {};
++template<>
++struct fex_gen_config<wl_proxy_get_queue> {};
++template<>
++struct fex_gen_config<wl_event_queue_get_name> {};
