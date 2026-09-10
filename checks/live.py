@@ -552,6 +552,18 @@ if __name__ == "__main__":
                         check=True,
                         timeout=180,
                     )
+            check_process(
+                [
+                    fixtures["runtime"],
+                    "run",
+                    fixtures["vulkanTools"] + "/bin/vkcube",
+                    "--wsi",
+                    "xcb",
+                    "--c",
+                    "60",
+                ]
+            )
+            print("PASS x86-64 vkcube function loading and 60 rendered frames", flush=True)
         if options.binfmt:
             subprocess.run(
                 [
@@ -559,6 +571,9 @@ if __name__ == "__main__":
                     "--user",
                     "--map-root-user",
                     "--mount",
+                    "--pid",
+                    "--fork",
+                    "--mount-proc",
                     "--propagation",
                     "private",
                     fixtures["nativeView"],

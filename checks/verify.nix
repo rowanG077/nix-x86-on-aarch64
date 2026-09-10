@@ -28,6 +28,7 @@ let
       core32 = toString guests.pkgsi686Linux.coreutils;
       bash = toString guests.bashInteractive;
       probes = toString probes;
+      vulkanTools = toString guests.vulkan-tools;
       rules = toString (import ./module.nix { inherit pkgs; }).rulesFile;
       nixPath = "nixpkgs=${pkgs.path}:nixpkgs-overlays=${../nix/x86pkgs.nix}";
     }

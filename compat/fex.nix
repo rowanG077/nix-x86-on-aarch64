@@ -33,10 +33,11 @@ let
     "${cross.stdenv.cc.cc}/lib/gcc/${cross.stdenv.hostPlatform.config}/${cross.stdenv.cc.cc.version}";
 in
 upstream.overrideAttrs (old: {
-  version = "2609";
+  version = "2609-unstable-2026-09-10";
   src = old.src.override {
-    tag = "FEX-2609";
-    hash = "sha256-L6dy8FBT/4mHBKq/nifdYREIb6C/eG8Ph6FP9ET4Syc=";
+    tag = null;
+    rev = "e431bfe0fa80d44207eafc6c2c798cda70d41266";
+    hash = "sha256-JfCAWwHZ59zeoiwgZ8h9wlBuQaSsEqGHh7Yr1MT44oQ=";
   };
   patches =
     (old.patches or [ ])

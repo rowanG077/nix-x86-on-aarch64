@@ -21,7 +21,7 @@ Cancellation is checked after the guest parent exits, with descendants retaining
 
 The protocol tests the completion acknowledgement race, output after parent exit and status preservation. The shared FEXServer stays outside request cgroups and keeps its PID. Helpers have time limits.
 
-`--graphics` checks the session bus and PipeWire, then loads GL, EGL, Wayland, ALSA, DRM and Vulkan for each ABI through FHS and absolute Nix paths. It also exercises callbacks, pointer conversion, audio, EGL/GL contexts and Vulkan enumeration. It needs a working desktop.
+`--graphics` checks the session bus and PipeWire, then loads GL, EGL, Wayland, ALSA, DRM and Vulkan for each ABI through FHS and absolute Nix paths. It also exercises callbacks, pointer conversion, audio, EGL/GL contexts and Vulkan enumeration. Finally, the pinned x86-64 `vkcube` renders 60 frames through XCB, covering Vulkan function lookup, device creation and presentation. It needs a working desktop with X11 or Xwayland.
 
 `--binfmt` creates a private binfmt filesystem in nested user/mount namespaces. It registers the **module-generated** handlers, runs both ELF ABIs, checks `argv[0]`, and runs `x86pkgs.hello` and x86 Wine. The table is unmounted afterward and host handlers are unchanged.
 

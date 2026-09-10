@@ -19,7 +19,7 @@ Cancellation requires cgroup v2 and `cgroup.kill` in the guest kernel. Requests 
 | ALSA | Native thunk | x86 library |
 | DRM | Native thunk | x86 library |
 
-All six are enabled by default. FEX 2609 does not implement i386 Vulkan, ALSA or DRM thunks, so these use the image's corresponding x86 libraries. CUDA is not part of this hardware-independent forwarding set. Upstream application-specific FEX configuration can disable a thunk to work around an application bug.
+All six are enabled by default. The pinned FEX revision does not implement i386 Vulkan, ALSA or DRM thunks, so these use the image's corresponding x86 libraries. CUDA is not part of this hardware-independent forwarding set. Upstream application-specific FEX configuration can disable a thunk to work around an application bug.
 
 Checks cover native dependencies, guest ABIs, C++ lifetime, GL/EGL entrypoints, Wayland interfaces and Nix library paths. Live probes also cover callbacks, audio, EGL/GL and Vulkan. They do not cover every extension or application.
 
