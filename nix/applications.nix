@@ -67,7 +67,10 @@ in
         ];
       })
     ];
-    postBuild = ''ln -s ${steam-unwrapped}/share/icons "$out/share/icons"'';
+    postBuild = ''
+      ln -s ${steam-unwrapped}/share/icons "$out/share/icons"
+      ln -s x86-arm-steam "$out/bin/steam"
+    '';
     meta.mainProgram = "x86-arm-steam";
   };
   wine = writeShellApplication {

@@ -46,7 +46,10 @@ Rebuild NixOS, then open a new shell. Enabling the runtime installs **both ELF h
 ```sh
 nix-shell -p x86pkgs.hello --run hello
 nix-shell -p x86pkgs.wineWow64Packages.stable --run 'wine --version'
+steam # When programs.x86-on-arm.steam.enable is true
 ```
+
+The module sets `<nixpkgs>` to the system's Nixpkgs source and exposes the x86 overlay to `nix-shell`. Steam is available as both `steam` and `x86-arm-steam`, with the same launcher behind either command.
 
 `x86packages` aliases `x86pkgs`, the native x86-64 package set from the same nixpkgs revision. Cached packages work normally; uncached derivations need a suitable builder. The runtime leaves Nix daemon build-platform settings unchanged.
 

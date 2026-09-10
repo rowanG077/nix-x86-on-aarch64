@@ -115,7 +115,12 @@ in
           # Modern i686 binaries use EM_386 (3).
           x86-on-arm-i686 = utils.binfmtMagics.i386-linux;
         };
-    nix.nixPath = [ "nixpkgs-overlays=${./x86pkgs.nix}" ];
+    # Defining nixPath overrides NixOS's default list, including <nixpkgs>.
+    # Keep nix-shell on the same revision as the system and its x86 overlay.
+    nix.nixPath = [
+      "nixpkgs=${pkgs.path}"
+      "nixpkgs-overlays=${./x86pkgs.nix}"
+    ];
     hardware.graphics.enable = lib.mkDefault true;
   };
 }

@@ -7,7 +7,7 @@
 - **Runtime contracts:** backend selection, explicit software gate, transport-specific Vulkan selection despite a populated host driver directory, direct FEX on other GPUs, environment isolation, preserved arguments and `argv[0]`, executable paths containing `=`, lookup past incompatible PATH entries, signal forwarding and private file cleanup, configuration identity, display socket discovery without shared-directory changes.
 - **Image:** both x86 ELF loaders, library architectures, closed relative links, all Mesa ICDs, certificates, linker cache and thunk path coverage.
 - **Forwarding:** each native thunk's `dlopen` dependencies, guest ELF ABI, constructors/finalizers and NODELETE, public GL/GLES/EGL APIs, Wayland interface symbols and ALSA mixer callbacks.
-- **NixOS module:** enabling the module supplies both actual ELF masks with `P` semantics and the x86 package aliases, without enabling Nix daemon emulated build platforms. Software mode is rejected unless its separate gate is enabled.
+- **NixOS module:** enabling the module supplies both actual ELF masks with `P` semantics and the x86 package aliases, without enabling Nix daemon emulated build platforms. A fresh Nix evaluation resolves `x86pkgs.hello` through the module's `NIX_PATH`, and the Steam package provides both launcher names. Software mode is rejected unless its separate gate is enabled.
 - **Probes:** cross-compile the 32-bit and 64-bit live ABI and cancellation probes and their small native Wayland server.
 - **Style:** Nix formatting and Python formatting/lint checks.
 
