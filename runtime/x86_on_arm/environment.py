@@ -2,6 +2,7 @@
 
 import os
 import re
+import socket
 from pathlib import Path
 
 VM_ENVIRONMENT = {
@@ -118,11 +119,21 @@ def x11_socket(source, directory=Path("/tmp/.X11-unix")):
     if not display:
         return None
     path = directory / ("X" + display[1])
-    if path.is_socket():
-        return str(path)
     renamed = path.with_name(path.name + "_")
-    if renamed.is_socket() and renamed.stat().st_uid == os.getuid():
-        return str(renamed)
+    for candidate in (path, renamed):
+        try:
+            if not candidate.is_socket():
+                continue
+            if candidate == renamed and candidate.stat().st_uid != os.getuid():
+                continue
+            # A stale socket can remain at Xn while Xwayland listens on Xn_.
+            # Checking the file type alone leaves guest X11 clients hanging.
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(0.5)
+                connection.connect(str(candidate))
+            return str(candidate)
+        except OSError:
+            continue
     return None
 
 

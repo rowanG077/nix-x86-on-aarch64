@@ -286,6 +286,7 @@ class PolicyTests(unittest.TestCase):
             self.assertIsNone(x11_socket(source, directory))
             with socket.socket(socket.AF_UNIX) as server:
                 server.bind(str(renamed))
+                server.listen(8)
                 self.assertEqual(x11_socket(source, directory), str(renamed))
                 self.assertFalse(path.exists())
                 with patch("x86_on_arm.environment.os.getuid", return_value=os.getuid() + 1):
@@ -294,6 +295,28 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(x11_socket(source, directory), str(path))
             self.assertIsNone(x11_socket({"DISPLAY": "remote:7"}, directory))
             self.assertEqual(x11_socket({"X11_SOCKET": "/custom/socket"}), "/custom/socket")
+
+    def test_stale_display_socket_does_not_hide_live_renamed_socket(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            path, renamed = directory / "X7", directory / "X7_"
+            source = {"DISPLAY": ":7"}
+            with socket.socket(socket.AF_UNIX) as stale:
+                stale.bind(str(path))
+            with socket.socket(socket.AF_UNIX) as server:
+                server.bind(str(renamed))
+                server.listen(8)
+                self.assertEqual(x11_socket(source, directory), str(renamed))
+                self.assertTrue(path.is_socket())
+                self.assertTrue(renamed.is_socket())
+                with patch("x86_on_arm.environment.os.getuid", return_value=os.getuid() + 1):
+                    self.assertIsNone(x11_socket(source, directory))
+                path.unlink()
+                with socket.socket(socket.AF_UNIX) as primary:
+                    primary.bind(str(path))
+                    primary.listen(8)
+                    self.assertEqual(x11_socket(source, directory), str(path))
+            self.assertIsNone(x11_socket(source, directory))
 
 
 if __name__ == "__main__":
