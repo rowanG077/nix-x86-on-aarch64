@@ -77,4 +77,4 @@ nix run .#verify -- --binfmt --graphics
 
 The last command requires a usable GPU/audio session and user namespaces. Kernel registration tests use a temporary private binfmt table; they do not change the host's registrations. See [testing](docs/testing.md) for the checks and recorded hardware results, [design](docs/design.md) for the execution model, and [compatibility](docs/compatibility.md) for ABI and platform limits.
 
-Pinned baseline: nixpkgs `58973d74f189`, FEX `e431bfe0fa80` (upstream HEAD on 2026-09-10, after 2609), muvm 0.6.0 plus upstream commit `c50e79c11eb5`. The FEX pin includes the Vulkan function self-lookup fix from [PR #5940](https://github.com/FEX-Emu/FEX/pull/5940). The small downstream compatibility patch set is documented in [compat/README.md](compat/README.md).
+Pinned baseline: nixpkgs `8825bebf6324`, FEX `e431bfe0fa80` (upstream HEAD on 2026-09-10, after 2609), muvm 0.6.0 plus upstream commit `c50e79c11eb5`. The FEX pin includes the Vulkan function self-lookup fix from [PR #5940](https://github.com/FEX-Emu/FEX/pull/5940). The small downstream compatibility patch set is documented in [compat/README.md](compat/README.md).
