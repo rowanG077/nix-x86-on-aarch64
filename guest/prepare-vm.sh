@@ -26,9 +26,14 @@ for name in ld.so.cache ld.so.conf timezone; do
     [[ -e "$work/etc/$name" ]] || touch "$work/etc/$name"
 done
 
-if [[ -d /run/opengl-driver ]]; then
+# /run is private to the VM. Turn the host's driver alias into a real
+# mountpoint so PressureVessel can export native and guest drivers separately.
+# Leave real directories alone (ln -sfn would create a link *inside* them).
+if [[ -L /run/opengl-driver && -d /run/opengl-driver ]]; then
     driver=$(readlink -f /run/opengl-driver)
-    ln -sfn "$driver" /run/opengl-driver
+    rm /run/opengl-driver
+    mkdir /run/opengl-driver
+    mount --bind "$driver" /run/opengl-driver
 fi
 mount --bind "$work/usr" /usr
 mount --bind "$work/usr/bin" /bin

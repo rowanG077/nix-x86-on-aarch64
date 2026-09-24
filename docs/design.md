@@ -31,6 +31,8 @@ The guest image uses nixpkgs' multilib application selection. It contains the co
 
 The VM's native `/bin` and `/usr` view contains links to a small Nix tool set. This works with muvm's noexec `/run` tmpfs and with split or merged `/usr` layouts.
 
+Graphics driver aliases are real directories in the guest image; their contents link into its relocated store. VM preparation similarly turns an existing native driver symlink into a bind mount within the VM's private `/run`. This avoids symlink mountpoints when PressureVessel exports the guest driver into the shared `/run`. The Bubblewrap helper restores native `/nix` and `/run/opengl-driver` for FEX and its thunks, and supplies both `/nix` and `/run` below each relocated x86 graphics provider.
+
 ## Execution
 
 The Python entrypoint receives the executable, arguments, environment and current directory. It writes a quoted command to a private 0600 file in a 0700 directory, then runs it through the guest shell. Application environment values stay out of muvm's process arguments.

@@ -565,6 +565,7 @@ if __name__ == "__main__":
             )
             print("PASS x86-64 vkcube function loading and 60 rendered frames", flush=True)
         if options.binfmt:
+            subprocess.run([fixtures["pressureVessel"]], check=True)
             subprocess.run(
                 [
                     "unshare",
