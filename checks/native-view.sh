@@ -11,7 +11,8 @@ cleanup() {
 trap cleanup EXIT
 
 for layout in split merged; do
-    root="$work/$layout"
+  for driver_layout in missing directory absolute relative chained dangling; do
+    root="$work/$layout-$driver_layout"
     mkdir -p "$root"/{usr/bin,usr/share,etc,run,nix/store,proc,dev}
     if [[ "$layout" == merged ]]; then
         ln -s usr/bin "$root/bin"
@@ -26,6 +27,18 @@ for layout in split merged; do
     touch "$root/dev/null"
     mount --bind /dev/null "$root/dev/null"
     mount -t tmpfs -o size=16m,noexec tmpfs "$root/run"
+    mkdir "$root/driver-store"
+    touch "$root/driver-store/native-driver"
+    case "$driver_layout" in
+        directory) mkdir "$root/run/opengl-driver"; touch "$root/run/opengl-driver/native-driver" ;;
+        absolute) ln -s /driver-store "$root/run/opengl-driver" ;;
+        relative) ln -s ../driver-store "$root/run/opengl-driver" ;;
+        chained)
+            ln -s ../driver-store "$root/run/driver-link"
+            ln -s driver-link "$root/run/opengl-driver"
+            ;;
+        dangling) ln -s /missing-driver "$root/run/opengl-driver" ;;
+    esac
     chroot "$root" @init@
     # Expand the mount options inside the synthetic filesystem.
     # shellcheck disable=SC2016
@@ -38,7 +51,18 @@ for layout in split merged; do
         /usr/bin/lsb_release --id
         options=$(/usr/bin/findmnt -n -o VFS-OPTIONS --target /usr)
         [[ ",$options," == *,noexec,* ]]
-    '
+        case "$1" in
+            missing) test ! -e /run/opengl-driver ;;
+            dangling) test -L /run/opengl-driver; test ! -e /run/opengl-driver ;;
+            *)
+                test -d /run/opengl-driver
+                test ! -L /run/opengl-driver
+                test -f /run/opengl-driver/native-driver
+                test ! -e /run/opengl-driver/opengl-driver
+                ;;
+        esac
+    ' driver-check "$driver_layout"
     umount -R "$root"
+  done
 done
-echo 'PASS bounded native filesystem on split and merged /usr, with noexec /run'
+echo 'PASS split/merged /usr, noexec /run and missing/directory/symlink native drivers'

@@ -114,8 +114,16 @@ pkgs.runCommand "x86-on-arm-rootfs"
 
     cp ${guests.mesa}/share/vulkan/icd.d/*.json "$out/usr/share/x86-on-arm/vulkan/"
     cp ${guests.pkgsi686Linux.mesa}/share/vulkan/icd.d/*.json "$out/usr/share/x86-on-arm/vulkan/"
-    ln -s ../nix/store/${baseNameOf (toString guests.mesa)} "$out/run/opengl-driver"
-    ln -s ../nix/store/${baseNameOf (toString guests.pkgsi686Linux.mesa)} "$out/run/opengl-driver-32"
+    # PressureVessel exports these paths as container mountpoints. Keep the
+    # directories real: an exported symlink can collide with native mounts or
+    # redirect them into the guest closure. Contents still relocate with it.
+    for pair in opengl-driver:${baseNameOf (toString guests.mesa)} opengl-driver-32:${baseNameOf (toString guests.pkgsi686Linux.mesa)}; do
+      driver="$out/run/''${pair%%:*}"
+      mkdir -p "$driver"
+      for entry in "$out/nix/store/''${pair#*:}"/*; do
+        ln -s "../../nix/store/''${pair#*:}/''${entry##*/}" "$driver/''${entry##*/}"
+      done
+    done
     rm "$out/usr/bin/ldconfig" "$out/usr/sbin/ldconfig"
     ln -s ../../nix/store/${baseNameOf (toString ldconfig)}/bin/ldconfig "$out/usr/bin/ldconfig"
     ln -s ../bin/ldconfig "$out/usr/sbin/ldconfig"

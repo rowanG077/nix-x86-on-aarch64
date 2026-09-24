@@ -10,6 +10,7 @@
 - **NixOS module:** enabling the module supplies both actual ELF masks with `P` semantics and the x86 package aliases, without enabling Nix daemon emulated build platforms. A fresh Nix evaluation resolves `x86pkgs.hello` through the module's `NIX_PATH`, and the Steam package provides both launcher names. Software mode is rejected unless its separate gate is enabled.
 - **Probes:** cross-compile the 32-bit and 64-bit live ABI and cancellation probes and their small native Wayland server.
 - **Style:** Nix formatting and Python formatting/lint checks.
+- **PressureVessel:** packed argument descriptors and payload preservation, separate native and guest store mounts, complete graphics-provider paths, and diagnostics for missing guest filesystems.
 
 ## Live checks
 
@@ -25,7 +26,9 @@ The protocol tests the completion acknowledgement race, output after parent exit
 
 `--binfmt` creates a private binfmt filesystem in nested user/mount namespaces. It registers the **module-generated** handlers, runs both ELF ABIs, checks `argv[0]`, and runs `x86pkgs.hello` and x86 Wine. The table is unmounted afterward and host handlers are unchanged.
 
-This option also tests VM filesystem preparation with split and merged `/usr` layouts and a 16 MiB noexec `/run` tmpfs.
+This option also tests VM filesystem preparation with split and merged `/usr` layouts and a 16 MiB noexec `/run` tmpfs. Native driver fixtures cover real directories, absolute/relative/chained links, missing paths and dangling links. An isolated Bubblewrap regression checks native symlink/directory driver sources, native store access, and both x86 graphics providers including Mesa's `drirc.d` data. The image check requires real guest driver directories so PressureVessel's exports cannot introduce symlink mountpoints.
+
+PressureVessel can still warn that `run/opengl-driver/share/drirc.d` is unlikely to appear in the graphics provider: it plans the container before our helper adds the provider mounts. The container regression verifies these data directories are actually reachable for both ABIs.
 
 ## Hardware record
 
@@ -47,5 +50,7 @@ Validation on 2026-09-09 used ARM64 NixOS, Apple M2 Max, and a 16 KiB host kerne
 | VM restart with a renamed host X11 socket; complete live suite | Passed |
 
 GPU-specific results on this machine are not evidence for other ARM GPUs. Direct execution was tested with a real 4 KiB ARM kernel inside the available VM, not on a second physical ARM board.
+
+On 2026-09-24, the flake checks and live graphics/binfmt suite passed again on this host after the driver mount changes for issue #3. A temporary copy of Steam's installed `steamrt3c` runtime also started through PressureVessel with Bubblewrap 0.11.2 and 0.12.0, passing the 32/64-bit thunk probes, both Mesa data-directory checks, and five rendered `vkcube` frames. The Steam client itself was not launched for this check.
 
 Application checks cover startup only. They do not establish game compatibility, hardware communication, licensing or every application feature.

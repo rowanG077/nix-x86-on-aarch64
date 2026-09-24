@@ -19,11 +19,20 @@ let
       inherit (pkgs) bash;
     };
   };
+  pressureVessel = writeShellApplication {
+    name = "x86-on-arm-pressure-vessel-check";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 ${./pressure-vessel.py} \
+        ${(pkgs.callPackage ../nix/applications.nix { x86-on-arm = runtime; }).bwrap}/bin/x86-arm-bwrap \
+        --bubblewrap ${lib.getExe pkgs.bubblewrap}
+    '';
+  };
   fixtures = writeText "x86-on-arm-live-fixtures.json" (
     builtins.toJSON {
       runtime = lib.getExe runtime;
       settings = toString runtime.settings;
       nativeView = lib.getExe nativeView;
+      pressureVessel = lib.getExe pressureVessel;
       core64 = toString guests.coreutils;
       core32 = toString guests.pkgsi686Linux.coreutils;
       bash = toString guests.bashInteractive;

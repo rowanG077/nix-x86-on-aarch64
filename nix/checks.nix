@@ -46,4 +46,5 @@ in
       '';
   probes = self.packages.aarch64-linux.probes;
   module = import ../checks/module.nix { inherit pkgs; };
+  pressure-vessel = import ../checks/pressure-vessel.nix { inherit pkgs; };
 }

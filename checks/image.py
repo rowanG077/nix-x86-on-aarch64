@@ -61,6 +61,10 @@ assert resolve("/etc/ld.so.cache").read_bytes().startswith(b"glibc-ld.so.cache")
 assert resolve("/etc/ssl/certs/ca-bundle.crt").stat().st_size > 100000
 assert resolve("/sbin/ldconfig") == resolve("/usr/bin/ldconfig")
 assert "libs.native" in resolve("/etc/alsa/conf.d/00-x86-on-arm.conf").read_text()
+for driver, abi in (("opengl-driver", 62), ("opengl-driver-32", 3)):
+    assert not (root / "run" / driver).is_symlink(), driver
+    assert machine(f"/run/{driver}/lib/libEGL_mesa.so.0") == abi, driver
+    assert resolve(f"/run/{driver}/share/drirc.d").is_dir(), driver
 database = json.loads(Path(sys.argv[2]).read_text())["DB"]
 directories = json.loads(sys.argv[3])
 for name, paths in directories.items():
